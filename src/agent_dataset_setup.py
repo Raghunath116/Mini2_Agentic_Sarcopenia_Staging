@@ -4,12 +4,6 @@ import argparse
 from datetime import datetime
 from tcia_utils import nbia
 
-# ============ CONFIG ============
-DATA_DIR = "data/raw"
-LOG_DIR = "logs"
-TXT_LOG = os.path.join(LOG_DIR, "dataset_report.txt")
-JSON_LOG = os.path.join(LOG_DIR, "dataset_report.json")
-# ================================
 
 def create_dirs():
     os.makedirs(DATA_DIR, exist_ok=True)
