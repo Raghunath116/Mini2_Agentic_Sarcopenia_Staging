@@ -1,21 +1,19 @@
-# === Global Config for Project Paths ===
-
-# Raw dataset location (change if needed)
-DATA_DIR = "D:/DS_Mini_2"       # where your NSCLC-Radiomics data lives
-PROCESSED_DIR = "data/processed"  # where processed L3 slices will be saved
-LOG_DIR = "logs"                  # where all logs go
-
-# Project metadata
-PROJECT_NAME = "Mini2_Agentic_Sarcopenia_Staging"
-DATASET_NAME = "NSCLC-Radiomics"
-
-# Paths for L3 extractor
+# ---- L3 extractor settings ----
 DATASET_DIR = r"D:\DS_Mini_2\manifest-1603198545583\NSCLC-Radiomics"
+
+# Output folders (relative to repo root)
 OUTPUT_L3_DIR = r"outputs\l3_slices"
 LOGS_DIR = r"outputs\logs"
 FIGURES_DIR = r"outputs\figures"
 
-# L3 slice detection thresholds
-L3_Z_MIN = -250
-L3_Z_MAX = -100
-EXTRACTION_BUFFER = 5  # ± slices around L3 center
+# Visualization window for muscle-friendly contrast (WL/WW)
+WINDOW_LEVEL = 40     
+WINDOW_WIDTH = 400    
+
+# Lumbar band as a fraction of craniocaudal extent
+LUMBAR_LOW_FRAC = 0.60   # 60% from head
+LUMBAR_HIGH_FRAC = 0.75  # 75% from head
+
+# Guardrails on number of slices to keep
+MIN_LUMBAR_SLICES = 8
+MAX_LUMBAR_SLICES = 20
