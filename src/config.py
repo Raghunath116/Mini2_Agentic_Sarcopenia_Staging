@@ -7,10 +7,10 @@ LOGS_DIR = r"outputs\logs"
 FIGURES_DIR = r"outputs\figures"
 
 # Visualization window for muscle-friendly contrast (WL/WW)
-WINDOW_LEVEL = 40     
-WINDOW_WIDTH = 400    
+WINDOW_LEVEL = 40     # center
+WINDOW_WIDTH = 400    # width
 
-# Lumbar band as a fraction of craniocaudal extent
+# Lumbar band as a fraction of craniocaudal extent (percentile approach)
 LUMBAR_LOW_FRAC = 0.60   # 60% from head
 LUMBAR_HIGH_FRAC = 0.75  # 75% from head
 
