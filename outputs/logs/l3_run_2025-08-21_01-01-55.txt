@@ -1,0 +1,9 @@
+[INFO] L3 Extractor start: 2025-08-21_01-01-55
+[INFO] Input dataset: D:\DS_Mini_2\manifest-1603198545583\NSCLC-Radiomics
+[INFO] Output dir: outputs\l3_slices
+[INFO] Lumbar band: 0.60-0.75
+[INFO] WL/WW: 40/400
+[INFO] Patients processed ok=422, failed=0
+[INFO] Index: outputs\logs\l3_index.csv
+[INFO] Previews: outputs\figures
+[INFO] Done: 2025-08-21_01-19-49
