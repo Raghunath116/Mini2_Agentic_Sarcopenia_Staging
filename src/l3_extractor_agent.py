@@ -1,90 +1,207 @@
-import os
-import pydicom
+import os, sys, argparse, random, datetime
+from typing import List, Dict
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from config import DATASET_DIR, OUTPUT_L3_DIR, LOGS_DIR, FIGURES_DIR, L3_Z_MIN, L3_Z_MAX, EXTRACTION_BUFFER
 
-# Ensure directories exist
-os.makedirs(OUTPUT_L3_DIR, exist_ok=True)
-os.makedirs(LOGS_DIR, exist_ok=True)
-os.makedirs(FIGURES_DIR, exist_ok=True)
+from config import (
+    DATASET_DIR, OUTPUT_L3_DIR, LOGS_DIR, FIGURES_DIR,
+    WINDOW_LEVEL, WINDOW_WIDTH,
+    LUMBAR_LOW_FRAC, LUMBAR_HIGH_FRAC,
+    MIN_LUMBAR_SLICES, MAX_LUMBAR_SLICES
+)
+from utils import (
+    ensure_dir, is_dicom, safe_dcmread, modality_of, series_uid,
+    instance_number, z_position, to_hu, window_hu, save_png, write_csv
+)
 
-def load_dicom_series(folder):
-    slices = []
-    for f in os.listdir(folder):
-        if f.endswith(".dcm"):
-            ds = pydicom.dcmread(os.path.join(folder, f))
-            if hasattr(ds, "ImagePositionPatient"):
-                slices.append(ds)
-    slices.sort(key=lambda x: x.ImagePositionPatient[2])  # Sort by Z-axis
-    return slices
+def timestamp() -> str:
+    return datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-def find_l3_slices(slices):
-    z_positions = [s.ImagePositionPatient[2] for s in slices]
-    z_array = np.array(z_positions)
+def find_patient_dirs(dataset_root: str) -> List[str]:
+    # Patients are immediate children (e.g., LUNG1-001)
+    return [os.path.join(dataset_root, d) for d in os.listdir(dataset_root)
+            if os.path.isdir(os.path.join(dataset_root, d))]
 
-    # Find indices in the L3 range
-    l3_indices = np.where((z_array >= L3_Z_MIN) & (z_array <= L3_Z_MAX))[0]
-    if len(l3_indices) == 0:
+def collect_dicoms(root: str) -> List[str]:
+    files = []
+    for dirpath, _, filenames in os.walk(root):
+        for fn in filenames:
+            fp = os.path.join(dirpath, fn)
+            if is_dicom(fp):
+                files.append(fp)
+    return files
+
+def group_ct_by_series(dicom_files: List[str]) -> Dict[str, List[str]]:
+    groups: Dict[str, List[str]] = {}
+    for fp in dicom_files:
+        ds = safe_dcmread(fp)
+        if ds is None:
+            continue
+        if modality_of(ds) != "CT":
+            continue
+        uid = series_uid(ds)
+        groups.setdefault(uid, []).append(fp)
+    # filter tiny/garbage series
+    return {k: v for k, v in groups.items() if len(v) >= 10}
+
+def load_series_sorted(series_files: List[str]):
+    dsets = []
+    for fp in series_files:
+        ds = safe_dcmread(fp)
+        if ds is not None:
+            dsets.append(ds)
+    # sort by Z (then InstanceNumber)
+    zs = [z_position(d) for d in dsets]
+    if any(np.isfinite(zs)):
+        dsets.sort(key=lambda d: (z_position(d), instance_number(d)))
+    else:
+        dsets.sort(key=lambda d: instance_number(d))
+    return dsets
+
+def choose_primary_series(groups: Dict[str, List[str]]) -> List[str]:
+    if not groups:
         return []
+    # choose CT series with most slices
+    best_uid = max(groups.keys(), key=lambda k: len(groups[k]))
+    return groups[best_uid]
 
-    # Take buffer around the center
-    center = l3_indices[len(l3_indices)//2]
-    start = max(center - EXTRACTION_BUFFER, 0)
-    end = min(center + EXTRACTION_BUFFER, len(slices)-1)
-    return list(range(start, end+1))
+def select_lumbar_indices(sorted_series) -> List[int]:
+    n = len(sorted_series)
+    if n == 0:
+        return []
+    zs = [z_position(ds) for ds in sorted_series]
+    # use normalized Z if scan covers sufficient craniocaudal extent
+    if np.all(np.isfinite(zs)) and (max(zs) - min(zs) > 50):
+        z_min, z_max = float(min(zs)), float(max(zs))
+        z_norm = [(z - z_min) / max((z_max - z_min), 1e-6) for z in zs]
+        idx = [i for i, zn in enumerate(z_norm) if LUMBAR_LOW_FRAC <= zn <= LUMBAR_HIGH_FRAC]
+    else:
+        lo = int(LUMBAR_LOW_FRAC * n)
+        hi = int(LUMBAR_HIGH_FRAC * n)
+        idx = list(range(lo, hi + 1))
 
-def save_slices(patient_id, slices, indices):
-    out_dir = os.path.join(OUTPUT_L3_DIR, patient_id)
-    os.makedirs(out_dir, exist_ok=True)
-    saved_paths = []
-    for idx in indices:
-        pixel_array = slices[idx].pixel_array
-        # Normalize to 0-255
-        pixel_array = ((pixel_array - pixel_array.min()) / (pixel_array.max() - pixel_array.min()) * 255).astype(np.uint8)
-        out_path = os.path.join(out_dir, f"{idx}.png")
-        plt.imsave(out_path, pixel_array, cmap="gray")
-        saved_paths.append(out_path)
-    return saved_paths
+    # guardrails
+    if len(idx) < MIN_LUMBAR_SLICES:
+        center = (idx[len(idx)//2] if idx else int(0.68 * n))
+        half = max(MIN_LUMBAR_SLICES // 2, 4)
+        start = max(center - half, 0)
+        end = min(center + half, n - 1)
+        idx = list(range(start, end + 1))
 
-def extract_l3_for_all():
-    patients = os.listdir(DATASET_DIR)
-    log_file = open(os.path.join(LOGS_DIR, "l3_extraction_log.csv"), "w")
-    log_file.write("PatientID,ExtractedSlices\n")
+    if len(idx) > MAX_LUMBAR_SLICES:
+        step = max(1, int(np.floor(len(idx) / MAX_LUMBAR_SLICES)))
+        idx = idx[::step][:MAX_LUMBAR_SLICES]
 
-    for patient in tqdm(patients, desc="Processing patients"):
-        patient_path = os.path.join(DATASET_DIR, patient)
-        if not os.path.isdir(patient_path): continue
+    return sorted(set(idx))
 
-        # Search for CT series folder (has most slices)
-        series_folders = [os.path.join(patient_path, s) for s in os.listdir(patient_path)]
-        ct_folder = max(series_folders, key=lambda sf: len(os.listdir(sf)))
+def save_lumbar_pngs(patient_id: str, sorted_series, indices: List[int], out_root: str) -> List[str]:
+    out_dir = os.path.join(out_root, patient_id)
+    ensure_dir(out_dir)
+    saved = []
+    for i in indices:
+        ds = sorted_series[i]
+        try:
+            pixels = ds.pixel_array  # may need pylibjpeg/gdcm for compressed
+        except Exception as e:
+            # skip problematic slice
+            continue
+        hu = to_hu(ds, pixels)
+        img8 = window_hu(hu, WINDOW_LEVEL, WINDOW_WIDTH)
+        out_fp = os.path.join(out_dir, f"{i:04d}.png")
+        save_png(img8, out_fp)
+        saved.append(out_fp)
+    return saved
 
-        slices = load_dicom_series(ct_folder)
-        if len(slices) == 0: continue
+def preview_montage(patient_id: str, png_paths: List[str], out_dir: str, k: int = 6):
+    if not png_paths:
+        return
+    sample = png_paths if len(png_paths) <= k else random.sample(png_paths, k)
+    cols = 3
+    rows = int(np.ceil(len(sample) / cols))
+    fig = plt.figure(figsize=(cols * 3, rows * 3))
+    for idx, p in enumerate(sample, 1):
+        ax = fig.add_subplot(rows, cols, idx)
+        ax.imshow(plt.imread(p), cmap="gray")
+        ax.axis("off")
+        ax.set_title(os.path.basename(p), fontsize=8)
+    ensure_dir(out_dir)
+    out_fp = os.path.join(out_dir, f"{patient_id}_lumbar_preview.png")
+    plt.tight_layout()
+    plt.savefig(out_fp, dpi=150)
+    plt.close(fig)
 
-        l3_indices = find_l3_slices(slices)
-        if len(l3_indices) == 0: continue
+def main():
+    parser = argparse.ArgumentParser(description="Production L3 Extractor Agent (percentile lumbar band)")
+    parser.add_argument("--input", type=str, default=DATASET_DIR, help="Dataset root (patients under here)")
+    parser.add_argument("--output", type=str, default=OUTPUT_L3_DIR, help="Where to write extracted slices")
+    parser.add_argument("--figures", type=str, default=FIGURES_DIR, help="Where to save preview montages")
+    parser.add_argument("--logcsv", type=str, default=os.path.join(LOGS_DIR, "l3_index.csv"), help="CSV index")
+    parser.add_argument("--logtxt", type=str, default=os.path.join(LOGS_DIR, f"l3_run_{timestamp()}.txt"), help="run log")
+    parser.add_argument("--preview", action="store_true", help="Save small montages")
+    args = parser.parse_args()
 
-        saved_paths = save_slices(patient, slices, l3_indices)
-        log_file.write(f"{patient},{len(saved_paths)}\n")
+    # ensure outputs
+    ensure_dir(args.output); ensure_dir(os.path.dirname(args.logcsv)); ensure_dir(args.figures); ensure_dir(os.path.dirname(args.logtxt))
 
-    log_file.close()
-    print(f"[INFO] Extraction complete. Logs saved to {LOGS_DIR}")
+    # open run log
+    with open(args.logtxt, "w", encoding="utf-8") as flog:
+        def log(msg):
+            print(msg)
+            flog.write(msg + "\n"); flog.flush()
 
-def preview_random(patient_count=3):
-    import random
-    patients = os.listdir(OUTPUT_L3_DIR)
-    sample_patients = random.sample(patients, min(patient_count, len(patients)))
-    for patient in sample_patients:
-        imgs = os.listdir(os.path.join(OUTPUT_L3_DIR, patient))
-        sample_img = os.path.join(OUTPUT_L3_DIR, patient, random.choice(imgs))
-        img = plt.imread(sample_img)
-        plt.imshow(img, cmap="gray")
-        plt.title(f"Preview: {patient}")
-        plt.show()
+        log(f"[INFO] L3 Extractor start: {timestamp()}")
+        log(f"[INFO] Input dataset: {args.input}")
+        log(f"[INFO] Output dir: {args.output}")
+        log(f"[INFO] Lumbar band: {LUMBAR_LOW_FRAC:.2f}-{LUMBAR_HIGH_FRAC:.2f}")
+        log(f"[INFO] WL/WW: {WINDOW_LEVEL}/{WINDOW_WIDTH}")
+
+        patients = find_patient_dirs(args.input)
+        rows: List[Dict] = []
+        ok, fail = 0, 0
+
+        for pdir in tqdm(patients, desc="Patients"):
+            pid = os.path.basename(pdir)
+            try:
+                dcm_files = collect_dicoms(pdir)
+                if not dcm_files:
+                    fail += 1; log(f"[WARN] {pid}: no DICOM files"); continue
+
+                groups = group_ct_by_series(dcm_files)
+                series_files = choose_primary_series(groups)
+                if not series_files:
+                    fail += 1; log(f"[WARN] {pid}: no CT series >= 10 slices"); continue
+
+                sorted_series = load_series_sorted(series_files)
+                if not sorted_series:
+                    fail += 1; log(f"[WARN] {pid}: could not load CT series"); continue
+
+                idx = select_lumbar_indices(sorted_series)
+                if not idx:
+                    fail += 1; log(f"[WARN] {pid}: no lumbar indices selected"); continue
+
+                saved = save_lumbar_pngs(pid, sorted_series, idx, args.output)
+                if len(saved) == 0:
+                    fail += 1; log(f"[WARN] {pid}: no slices saved (decode?)"); continue
+
+                if args.preview:
+                    preview_montage(pid, saved, args.figures, k=6)
+
+                for i, fp in zip(idx, saved):
+                    rows.append({"PatientID": pid, "SliceIndex": i, "SavedPath": fp.replace("\\", "/")})
+                ok += 1
+
+            except Exception as e:
+                fail += 1
+                log(f"[ERROR] {pid}: {e}")
+
+        # write index csv
+        write_csv(args.logcsv, rows, fieldnames=["PatientID", "SliceIndex", "SavedPath"])
+        log(f"[INFO] Patients processed ok={ok}, failed={fail}")
+        log(f"[INFO] Index: {args.logcsv}")
+        if args.preview:
+            log(f"[INFO] Previews: {args.figures}")
+        log(f"[INFO] Done: {timestamp()}")
 
 if __name__ == "__main__":
-    extract_l3_for_all()
-    preview_random()
+    main()
