@@ -1,11 +1,11 @@
 pydicom
 numpy
-matplotlib
 pandas
 tqdm
 Pillow
+matplotlib
 
-# Optional but recommended for compressed dicoms:
+# For compressed DICOMs (recommended)
 pylibjpeg
 pylibjpeg-libjpeg
 pylibjpeg-openjpeg
